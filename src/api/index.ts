@@ -93,7 +93,7 @@ export const getInterviewResult = async ({
       userId,
       interviewId,
     });
-    return response.data.data;
+    return response.data;
   } catch (error) {
     console.error("Error fetching interview result:", error);
     throw error;
@@ -108,6 +108,22 @@ export const updateUserDetails = async (
     return response.data;
   } catch (error) {
     console.error("Error updating user details:", error);
+    throw error;
+  }
+};
+
+export const retakeInterview = async ({
+  userId,
+  interviewId,
+}: {
+  userId: string;
+  interviewId: string;
+}): Promise<IAIInterviewUser> => {
+  try {
+    const response = await api.post("/retake", { userId, interviewId });
+    return response.data;
+  } catch (error) {
+    console.error("Error retaking interview:", error);
     throw error;
   }
 };
