@@ -4,15 +4,38 @@ import React, { useState, useRef, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { getInterviewDetails, submitAssessment } from "@/api";
-import { AnswerData, FullInterviewDetails, UserAnswer } from "@/types";
+import { FullInterviewDetails } from "@/types";
+import { useAzureRecognizer } from "@/lib/azure/useAzureRecognizer";
+import { useAudioRecorder } from "@/lib/azure/useAudioRecorder";
+import { assessPronunciationFromBlob } from "@/lib/azure/assessPronunciationFromBlob";
+import { calculateWeightedAssessment } from "@/lib/azure/calculateWeightedAssessment";
+
+interface ChatMessage {
+  id: number;
+  sender: "user" | "question";
+  text: string;
+  isFinal?: boolean;
+  questionIndex: number;
+}
 
 const InterviewPage = () => {
   const params = useParams();
   const { interviewId } = params as { interviewId: string };
   const queryClient = useQueryClient();
 
+  const userId = "67b41ececb876f82e14eab75";
+  const azureKey = process.env.NEXT_PUBLIC_AZURE_SPEECH_KEY!;
+  const azureRegion = process.env.NEXT_PUBLIC_AZURE_SPEECH_REGION!;
+
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
-  const userId = "67b41ececb876f82e14eab75"; // Placeholder for actual user ID
+  const [isAnswering, setIsAnswering] = useState(false);
+  const [timer, setTimer] = useState(0);
+  const [intervalId, setIntervalId] = useState<NodeJS.Timeout | null>(null);
+  const [finalTranscript, setFinalTranscript] = useState("");
+  const [recordedAudio, setRecordedAudio] = useState<Blob | null>(null);
+
+  const chatContainerRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const { data, isLoading, isError, error } = useQuery<
@@ -24,174 +47,221 @@ const InterviewPage = () => {
     enabled: !!interviewId,
   });
 
+  const currentQuestion = data?.questions?.[currentQuestionIndex];
+
+  const { startRecording, stopRecording } = useAudioRecorder();
+
+  const { startRecognition, stopRecognition } = useAzureRecognizer({
+    azureKey,
+    azureRegion,
+    onResult: ({ transcript, confidence, isFinal }) => {
+      setChatMessages((prev) => {
+        const filtered = prev.filter(
+          (msg) =>
+            !(
+              msg.sender === "user" &&
+              msg.questionIndex === currentQuestionIndex
+            )
+        );
+        return [
+          ...filtered,
+          {
+            id: Date.now(),
+            sender: "user",
+            text: transcript,
+            isFinal,
+            questionIndex: currentQuestionIndex,
+          },
+        ];
+      });
+
+      if (isFinal) {
+        setFinalTranscript(transcript);
+      }
+    },
+    onEnd: () => {
+      setIsAnswering(false);
+      if (intervalId) clearInterval(intervalId);
+      setIntervalId(null);
+    },
+  });
+
   const submitMutation = useMutation({
     mutationFn: submitAssessment,
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: ["interviewDetails", interviewId],
       });
-
-      if (currentQuestionIndex < (data?.questions?.length || 0) - 1) {
+      setFinalTranscript("");
+      setRecordedAudio(null);
+      if (currentQuestionIndex < (data?.questions?.length ?? 0) - 1) {
         setCurrentQuestionIndex((prev) => prev + 1);
       } else {
-        alert("Interview Completed!");
+        alert("Interview completed!");
       }
-    },
-    onError: (err) => {
-      console.error("Error submitting assessment:", err);
-      alert("Failed to submit answer. Please try again.");
     },
   });
 
-  // Ensure audio plays only after it's fully buffered
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+  const handleStart = async () => {
+    if (!currentQuestion) return;
 
-    const handleCanPlay = () => {
-      audio.play().catch((err) => {
-        console.warn("Autoplay failed:", err.message);
-      });
-    };
-
-    audio.pause();
-    audio.currentTime = 0;
-    audio.load(); // force re-buffer
-    audio.addEventListener("canplaythrough", handleCanPlay);
-
-    return () => {
-      audio.removeEventListener("canplaythrough", handleCanPlay);
-    };
-  }, [currentQuestionIndex]);
-
-  if (!interviewId)
-    return <div className='text-center py-8'>No interview ID provided.</div>;
-  if (isLoading)
-    return <div className='text-center py-8'>Loading interview...</div>;
-  if (isError)
-    return (
-      <div className='text-center py-8 text-red-500'>
-        Error: {error?.message}
-      </div>
-    );
-  if (!data || !data.questions || data.questions.length === 0)
-    return (
-      <div className='text-center py-8'>
-        No interview data or questions found.
-      </div>
-    );
-
-  const currentQuestion = data.questions[currentQuestionIndex];
-  const currentAnswer = data?.userAnswers?.find(
-    (answer: UserAnswer) => answer.questionId === currentQuestion._id
-  );
-
-  const handleRecordAnswer = () => {
-    const simulatedAnswer: AnswerData = {
-      Display: `Simulated answer for ${currentQuestion.question}`,
-      Confidence: Math.random(),
-      PronunciationAssessment: {
-        AccuracyScore: Math.floor(Math.random() * 100),
-        FluencyScore: Math.floor(Math.random() * 100),
-        CompletenessScore: Math.floor(Math.random() * 100),
-        PronScore: Math.floor(Math.random() * 100),
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: Date.now(),
+        sender: "question",
+        text: currentQuestion.question,
+        isFinal: true,
+        questionIndex: currentQuestionIndex,
       },
-    };
+    ]);
+
+    setFinalTranscript("");
+    setRecordedAudio(null);
+    setIsAnswering(true);
+    setTimer(0);
+    const id = setInterval(() => setTimer((t) => t + 1), 1000);
+    setIntervalId(id);
+
+    await startRecording();
+    startRecognition();
+  };
+
+  const handleStop = async () => {
+    stopRecognition();
+    const blob = await stopRecording();
+    setRecordedAudio(blob);
+    if (intervalId) clearInterval(intervalId);
+    setIntervalId(null);
+    setIsAnswering(false);
+  };
+
+  const handleSubmit = async () => {
+    if (!finalTranscript || !recordedAudio || !currentQuestion) {
+      alert("Missing transcript or audio.");
+      return;
+    }
+
+    const referenceText = finalTranscript.trim();
+    const result = await assessPronunciationFromBlob({
+      audioBlob: recordedAudio,
+      referenceText,
+      azureKey,
+      azureRegion,
+    });
+
+    const aggregated = calculateWeightedAssessment([result]);
 
     submitMutation.mutate({
       userId,
       interviewId,
       questionId: currentQuestion._id,
-      data: simulatedAnswer,
+      data: aggregated,
     });
   };
 
-  const progress = `${currentQuestionIndex + 1} of ${data.questions.length}`;
+  const formatTime = (seconds: number) => {
+    const min = Math.floor(seconds / 60);
+    const sec = seconds % 60;
+    return `${min.toString().padStart(2, "0")}:${sec
+      .toString()
+      .padStart(2, "0")}`;
+  };
+
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop =
+        chatContainerRef.current.scrollHeight;
+    }
+  }, [chatMessages]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current.load();
+      audioRef.current.play().catch(() => {});
+    }
+
+    setFinalTranscript("");
+    setRecordedAudio(null);
+    setTimer(0);
+    if (intervalId) {
+      clearInterval(intervalId);
+      setIntervalId(null);
+    }
+  }, [currentQuestionIndex]);
+
+  if (isLoading)
+    return <div className='text-center p-8'>Loading interview...</div>;
+  if (isError)
+    return <div className='text-red-600 text-center p-8'>{error.message}</div>;
+  if (!data || !currentQuestion)
+    return <div className='p-8 text-center'>No data available.</div>;
 
   return (
-    <div className='container mx-auto p-4 md:p-8 lg:p-12'>
-      <h1 className='text-3xl font-bold mb-6 text-center md:text-left'>
-        Interview: {data.name}
-      </h1>
-
-      <div className='bg-white shadow-md rounded-lg p-6 md:p-8 mb-6'>
-        <h2 className='text-xl font-semibold mb-4'>
-          Question {currentQuestionIndex + 1}
-        </h2>
-        <p className='text-lg mb-4'>{currentQuestion.question}</p>
-
+    <div className='flex h-screen divide-x'>
+      <div className='w-1/2 p-6 space-y-6 overflow-y-auto'>
+        <h1 className='text-2xl font-bold'>{data.name}</h1>
+        <p className='text-lg'>{currentQuestion.question}</p>
         <audio
           ref={audioRef}
-          controls
-          preload='auto'
           src={currentQuestion.audioUrl}
-          className='w-full mt-2 mb-4'
+          controls
+          className='w-full'
         />
 
-        <div className='flex flex-col sm:flex-row justify-between items-center mb-4 gap-4'>
-          <p className='text-sm text-gray-600'>
-            Attempts: {currentAnswer?.attemptCount || 0} /{" "}
-            {currentAnswer?.totalAttempts || "N/A"}
-          </p>
-          <p className='text-sm text-gray-600'>Progress: {progress}</p>
-        </div>
-
-        <button
-          onClick={handleRecordAnswer}
-          disabled={submitMutation.isPending}
-          className='bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded disabled:opacity-50'
-        >
-          {submitMutation.isPending ? "Submitting..." : "Record Answer"}
-        </button>
-
-        {currentAnswer && (
-          <div className='mt-4 p-4 bg-gray-100 rounded-md'>
-            <h3 className='font-semibold mb-2'>Last Attempt Feedback:</h3>
-            <p>Display: {currentAnswer.data.Display}</p>
-            <p>
-              Confidence: {(currentAnswer.data.Confidence * 100).toFixed(2)}%
-            </p>
-            <p>
-              Accuracy Score:{" "}
-              {currentAnswer.data.PronunciationAssessment.AccuracyScore}
-            </p>
-            <p>
-              Fluency Score:{" "}
-              {currentAnswer.data.PronunciationAssessment.FluencyScore}
-            </p>
-            <p>
-              Completeness Score:{" "}
-              {currentAnswer.data.PronunciationAssessment.CompletenessScore}
-            </p>
-            <p>
-              Pronunciation Score:{" "}
-              {currentAnswer.data.PronunciationAssessment.PronScore}
-            </p>
+        {isAnswering && (
+          <div className='text-blue-600 font-medium'>
+            ⏱ Timer: {formatTime(timer)}
           </div>
         )}
+
+        <div className='space-x-2'>
+          <button
+            className='bg-blue-600 text-white px-4 py-2 rounded'
+            onClick={handleStart}
+            disabled={isAnswering}
+          >
+            🎙 Start
+          </button>
+          <button
+            className='bg-red-600 text-white px-4 py-2 rounded'
+            onClick={handleStop}
+            disabled={!isAnswering}
+          >
+            ⏹ Stop
+          </button>
+          <button
+            className='bg-green-600 text-white px-4 py-2 rounded'
+            onClick={handleSubmit}
+            disabled={!finalTranscript || !recordedAudio}
+          >
+            ✅ Submit
+          </button>
+        </div>
       </div>
 
-      <div className='flex justify-between mt-4'>
-        <button
-          onClick={() =>
-            setCurrentQuestionIndex((prev) => Math.max(0, prev - 1))
-          }
-          disabled={currentQuestionIndex === 0}
-          className='px-4 py-2 bg-gray-200 text-gray-700 rounded-md disabled:opacity-50'
-        >
-          Previous Question
-        </button>
-        <button
-          onClick={() =>
-            setCurrentQuestionIndex((prev) =>
-              Math.min((data?.questions.length || 0) - 1, prev + 1)
-            )
-          }
-          disabled={currentQuestionIndex === (data?.questions.length || 0) - 1}
-          className='px-4 py-2 bg-gray-200 text-gray-700 rounded-md disabled:opacity-50'
-        >
-          Next Question
-        </button>
+      <div className='w-1/2 p-6 bg-gray-50 overflow-y-auto'>
+        <h2 className='text-xl font-semibold mb-4'>Live Transcript</h2>
+        <div ref={chatContainerRef} className='space-y-3'>
+          {chatMessages
+            .filter((msg) => msg.questionIndex <= currentQuestionIndex)
+            .map((msg) => (
+              <div
+                key={msg.id}
+                className={`max-w-[80%] px-4 py-2 rounded-lg shadow ${
+                  msg.sender === "user"
+                    ? msg.isFinal
+                      ? "bg-blue-100 text-blue-800 self-end ml-auto"
+                      : "bg-blue-50 text-blue-500 italic self-end ml-auto"
+                    : "bg-green-100 text-green-800 self-start"
+                }`}
+              >
+                {msg.text}
+              </div>
+            ))}
+        </div>
       </div>
     </div>
   );
