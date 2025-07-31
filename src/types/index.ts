@@ -98,3 +98,8 @@ export interface SubmitAssessmentResponse {
   message: string;
   // Add any other relevant response fields
 }
+
+export interface UpdateUserDetailsRequest {
+  userId: string;
+  name?: string;
+}

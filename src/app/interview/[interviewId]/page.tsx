@@ -3,7 +3,11 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getInterviewDetails, submitAssessment } from "@/api";
+import {
+  getInterviewDetails,
+  getInterviewResult,
+  submitAssessment,
+} from "@/api";
 import { FullInterviewDetails } from "@/types";
 import { useAzureRecognizer } from "@/lib/azure/useAzureRecognizer";
 import { useAudioRecorder } from "@/lib/azure/useAudioRecorder";
@@ -23,7 +27,7 @@ const InterviewPage = () => {
   const { interviewId } = params as { interviewId: string };
   const queryClient = useQueryClient();
 
-  const userId = "67b41ececb876f82e14eab75";
+  const userId = "67b41ececb876f82e14eab75"; // Replace with auth logic if needed
   const azureKey = process.env.NEXT_PUBLIC_AZURE_SPEECH_KEY!;
   const azureRegion = process.env.NEXT_PUBLIC_AZURE_SPEECH_REGION!;
 
@@ -34,6 +38,8 @@ const InterviewPage = () => {
   const [intervalId, setIntervalId] = useState<NodeJS.Timeout | null>(null);
   const [finalTranscript, setFinalTranscript] = useState("");
   const [recordedAudio, setRecordedAudio] = useState<Blob | null>(null);
+  const [isSubmittingFinal, setIsSubmittingFinal] = useState(false);
+  const [finalResultReady, setFinalResultReady] = useState(false);
 
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -54,7 +60,7 @@ const InterviewPage = () => {
   const { startRecognition, stopRecognition } = useAzureRecognizer({
     azureKey,
     azureRegion,
-    onResult: ({ transcript, confidence, isFinal }) => {
+    onResult: ({ transcript, isFinal }) => {
       setChatMessages((prev) => {
         const filtered = prev.filter(
           (msg) =>
@@ -88,16 +94,27 @@ const InterviewPage = () => {
 
   const submitMutation = useMutation({
     mutationFn: submitAssessment,
-    onSuccess: () => {
+    onSuccess: async () => {
       queryClient.invalidateQueries({
         queryKey: ["interviewDetails", interviewId],
       });
       setFinalTranscript("");
       setRecordedAudio(null);
-      if (currentQuestionIndex < (data?.questions?.length ?? 0) - 1) {
+
+      const isLast = currentQuestionIndex >= (data?.questions?.length ?? 0) - 1;
+
+      if (!isLast) {
         setCurrentQuestionIndex((prev) => prev + 1);
       } else {
-        alert("Interview completed!");
+        setIsSubmittingFinal(true);
+        try {
+          await getInterviewResult({ userId, interviewId });
+          setFinalResultReady(true);
+        } catch (err) {
+          console.log(err);
+          alert("Failed to fetch final result.");
+        }
+        setIsSubmittingFinal(false);
       }
     },
   });
@@ -232,13 +249,27 @@ const InterviewPage = () => {
           >
             ⏹ Stop
           </button>
-          <button
-            className='bg-green-600 text-white px-4 py-2 rounded'
-            onClick={handleSubmit}
-            disabled={!finalTranscript || !recordedAudio}
-          >
-            ✅ Submit
-          </button>
+
+          {finalResultReady ? (
+            <button
+              className='bg-purple-600 text-white px-4 py-2 rounded'
+              onClick={() => {
+                window.location.href = `/report/${interviewId}`;
+              }}
+            >
+              📊 View Report
+            </button>
+          ) : (
+            <button
+              className={`${
+                isSubmittingFinal ? "bg-gray-400" : "bg-green-600"
+              } text-white px-4 py-2 rounded`}
+              onClick={handleSubmit}
+              disabled={!finalTranscript || !recordedAudio || isSubmittingFinal}
+            >
+              {isSubmittingFinal ? "🔄 Generating Report..." : "✅ Submit"}
+            </button>
+          )}
         </div>
       </div>
 

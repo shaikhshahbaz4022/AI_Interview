@@ -6,7 +6,9 @@ import {
   InterviewMetaDetails,
   SubmitAssessmentRequest,
   SubmitAssessmentResponse,
+  UpdateUserDetailsRequest,
 } from "../types";
+import IAIInterviewUser from "@/interfaces/ai-interview-user.interface";
 
 const API_BASE_URL = "http://localhost:3000/api/v1/ai-interview";
 
@@ -75,6 +77,37 @@ export const submitAssessment = async (
     return response.data;
   } catch (error) {
     console.error("Error submitting assessment:", error);
+    throw error;
+  }
+};
+
+export const getInterviewResult = async ({
+  userId,
+  interviewId,
+}: {
+  userId: string;
+  interviewId: string;
+}): Promise<IAIInterviewUser> => {
+  try {
+    const response = await api.post("/result", {
+      userId,
+      interviewId,
+    });
+    return response.data.data;
+  } catch (error) {
+    console.error("Error fetching interview result:", error);
+    throw error;
+  }
+};
+
+export const updateUserDetails = async (
+  data: UpdateUserDetailsRequest
+): Promise<IAIInterviewUser> => {
+  try {
+    const response = await api.put("/user", data);
+    return response.data;
+  } catch (error) {
+    console.error("Error updating user details:", error);
     throw error;
   }
 };
